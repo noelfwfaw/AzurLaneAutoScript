@@ -34,6 +34,26 @@ TEMPLATES = {
 }
 
 
+def imread_gray(path):
+    """
+    读入灰度图。
+
+    Windows 下 cv2.imread 不支持非 ASCII 路径（本仓库运行目录可能含中文，
+    如 D:/360极速浏览器X下载/...），会静默返回 None；改走 np.fromfile + imdecode。
+
+    Returns:
+        np.ndarray | None:
+    """
+    try:
+        data = np.fromfile(path, dtype=np.uint8)
+    except Exception as e:
+        logger.info(e)
+        return None
+    if data.size == 0:
+        return None
+    return cv2.imdecode(data, cv2.IMREAD_GRAYSCALE)
+
+
 def _read_stream(stream):
     """
     adbutils 0.11 的 read_until_close() 会按 utf-8 解码，二进制截图不能用，
@@ -91,13 +111,20 @@ class MaaAssist:
             logger.info('辅助启动: disabled')
             return False
 
+        missing = []
         for name in TEMPLATES:
             file = os.path.join(ASSETS, name + '.png')
-            image = cv2.imread(file, cv2.IMREAD_GRAYSCALE)
+            image = imread_gray(file)
             if image is None:
-                logger.warning(f'辅助启动: 缺少模板 {file}')
-                return False
+                # 区分「文件不存在」与「文件在但读不出来」，后者常见于非 ASCII 路径
+                missing.append(file + ('（文件存在但无法解码）' if os.path.exists(file) else ''))
+                continue
             self.templates[name] = image
+        if missing:
+            # 一次报全：逐个 return 会让用户补一个跑一次
+            logger.warning(f'辅助启动: 缺少模板 {len(missing)} 个：' + '、'.join(missing))
+            logger.warning(f'请确认 {ASSETS} 下有 6 个 png，且路径不含无法读取的字符')
+            return False
 
         try:
             return self._run()
