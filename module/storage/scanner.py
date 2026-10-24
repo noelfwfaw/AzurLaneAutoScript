@@ -25,17 +25,17 @@ WHITELIST = [
     '喵箱SSR型',
 ]
 
-# 同名不同品质物品并存时，记录名加品质后缀（仅在该名字出现多种品质时）
-QUALITY_SUFFIX = {'gold': '(金)', 'purple': '(紫)'}
+# 同名多品质物品按品质区分研发图档位（display_name 内映射为 UR型/SSR型），
+# 输出名不再加 (金)/(紫) 兜底后缀——白名单中不存在同名异品质物品，
+# 该后缀只会产生非法键（如 心智单元(金)）
 
 
-def display_name(name, quality, suffix=False):
+def display_name(name, quality):
     """
     输出名按游戏稀有度命名：
     - 特装型/试作型突破 -> 加"部件"后缀
     - 装备研发图 -> 装备研发图UR型
     - 四类研发图按品质：紫UR型、金SSR型
-    - suffix=True（同名多数量分组）时其余物品加品质兜底后缀
     """
     if name == '装备研发图':
         return '装备研发图UR型'
@@ -47,8 +47,6 @@ def display_name(name, quality, suffix=False):
         if quality == 'gold':
             return name + 'SSR型'
         return name
-    if suffix:
-        return name + QUALITY_SUFFIX.get(quality, '')
     return name
 
 # 部件类物品（同档五种）：名条 OCR 常吞掉/互读档位数字（T1↔T4），
@@ -153,6 +151,16 @@ class MaterialScanner(StorageUI):
     # 上界不宜放宽，图标白色部分会被误读为前导数字
     AMOUNT_AREA = (55, 96, 123, 124)
     AMOUNT_THRESHOLD = 160
+    # 数量徽章几何（实测）：数字右对齐于格右 x+120~123，字高 18px，
+    # 行带 icon_top+101~+118。卡面白色画与数字同为 255 纯白，靠阈值
+    # 无法分开，改为从右往左逐位模板匹配，遇低分即停
+    AMOUNT_BAND_LEFT = 40
+    AMOUNT_BAND_RIGHT = 124
+    AMOUNT_DIGIT_TOP = 101
+    AMOUNT_DIGIT_H = 18
+    AMOUNT_RIGHT_MIN = 118
+    AMOUNT_MATCH_MIN = 0.70
+    AMOUNT_MAX_DIGITS = 6
     # 翻页滑动：内容区上滑约一行。用慢速拖拽（游戏按松手速度区分
     # 拖拽/甩动），基本不产生惯性翻滚，步长稳定 ~190px ≈ 1.07 行，
     # 每行物品稳定跨 2~3 页出现，偶发的单页 OCR 误读由跨页票数共识排除
@@ -173,6 +181,174 @@ class MaterialScanner(StorageUI):
         self.ocr_amount = AmountOcr([], threshold=self.AMOUNT_THRESHOLD, name='SSAmount')
         # 跨页数量共识：(白名单名, 品质) -> {数量: 出现页数}
         self.votes = {}
+        self._templates = None
+
+    def digit_templates(self):
+        """
+        加载 0-9 数字模板（由 dev_tools/storage_scan_replay.py 从冻结截图
+        的已知数量格提取，见 module/storage/amount_digits.json）。
+        模板不可用时退回原裁剪 OCR。
+
+        Returns:
+            dict: {数字字符: [np.ndarray(bool), ...]}
+        """
+        if self._templates is None:
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                'amount_digits.json')
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    raw = json.load(f)
+                # 同一数字保留全部实例：徽章绝对 x 不同导致亚像素栅格化
+                # 有 ±1px 差异，多个实例才能稳定拿到满分匹配
+                self._templates = {
+                    digit: [np.array([[c == '1' for c in line] for line in row],
+                                     dtype=bool)
+                            for row in instances]
+                    for digit, instances in raw.items()
+                }
+            except (OSError, ValueError, KeyError) as e:
+                logger.warning(f'MaterialScanner: digit templates unavailable, '
+                               f'fallback to amount OCR: {e}')
+                self._templates = {}
+        return self._templates
+
+    def read_amount(self, image, x, icon_top):
+        """
+        读取图标右下角数量。
+
+        卡面白色画与数字同为纯白，原裁剪区（AMOUNT_AREA）左侧会混入
+        画的一部分，被 OCR 当成前导数字（960 读成 2960），调阈值无法
+        分离。数量徽章右缘固定在格右 x+120~123、数字右对齐、字距
+        约 13px，改为从右往左逐位模板匹配，连续低分即停。
+
+        Args:
+            image (np.ndarray): 截图
+            x (int): 格子左上角 x
+            icon_top (int): 图标区顶 y
+
+        Returns:
+            int: 数量；完全读不出为 0
+        """
+        templates = self.digit_templates()
+        if templates:
+            amount = self._match_amount(image, x, icon_top, templates)
+            if amount is not None:
+                return amount
+        # 模板缺失或一位都匹配不上时退回原裁剪 OCR
+        area = self.AMOUNT_AREA
+        img = image[icon_top + area[1]:icon_top + area[3], x + area[0]:x + area[2]]
+        try:
+            return int(self.ocr_amount.ocr([img], direct_ocr=True)[0])
+        except (ValueError, TypeError, IndexError):
+            return 0
+
+    def _match_amount(self, image, x, icon_top, templates):
+        """
+        右锚定逐位数字模板匹配。
+
+        Returns:
+            int: 匹配出的数量；一位都匹配不上返回 None（交回 OCR）
+        """
+        left = x + self.AMOUNT_BAND_LEFT
+        right = x + self.AMOUNT_BAND_RIGHT
+        top = icon_top + self.AMOUNT_DIGIT_TOP
+        # 上下各留 1 行，容忍相位漂移（滑动导致的 1~2px 位移）
+        band = image[top - 1:top + 1 + self.AMOUNT_DIGIT_H, left:right]
+        if band.size == 0:
+            return None
+        white = ((band[:, :, 0] > 215) & (band[:, :, 1] > 215)
+                 & (band[:, :, 2] > 215))
+        cols = np.where(white.any(axis=0))[0]
+        cols = cols[cols >= x + self.AMOUNT_RIGHT_MIN - left]
+        if not len(cols):
+            return None
+        # 最右白列即末位数字右缘（徽章本身无白边）
+        right_edge = int(cols.max())
+        digits = []
+        cur_left = None
+        for _ in range(self.AMOUNT_MAX_DIGITS):
+            if cur_left is None:
+                lo, hi = right_edge - 13, right_edge
+            else:
+                # 数字按比例宽度紧密排布，相邻字间距 ~2~4px
+                lo, hi = cur_left - 7, cur_left - 1
+            best = None
+            for edge in range(lo, hi + 1):
+                for digit, instances in templates.items():
+                    for tpl in instances:
+                        w = tpl.shape[1]
+                        x0 = edge - w + 1
+                        if x0 < 0 or x0 + w > white.shape[1]:
+                            continue
+                        for dy in (-1, 0, 1):
+                            y0 = 1 + dy
+                            win = white[y0:y0 + tpl.shape[0], x0:x0 + w]
+                            if win.shape != tpl.shape:
+                                continue
+                            union = np.logical_or(win, tpl).sum()
+                            if not union:
+                                continue
+                            score = np.logical_and(win, tpl).sum() / union
+                            # 等分时取更靠右的位置：短线模板（1/7 等）
+                            # 可能在相邻数字的局部区域拿到同分
+                            if best is None or score >= best[0]:
+                                best = (score, digit, edge, x0)
+            if best is None or best[0] < self.AMOUNT_MATCH_MIN:
+                break
+            digits.append(best[1])
+            cur_left = best[3]
+        if not digits:
+            return None
+        # digits 是从右往左匹配出来的，拼回原顺序
+        return int(''.join(reversed(digits)))
+
+    @staticmethod
+    def _column_run(white):
+        """单列最长连续白像素 run 长度。"""
+        best = run = 0
+        for value in white:
+            run = run + 1 if value else 0
+            if run > best:
+                best = run
+        return best
+
+    @classmethod
+    def _has_ii_suffix(cls, label_image):
+        """
+        名条尾部是否带 "II"。
+
+        cnocr 会丢失名条尾部的 "II"（心智单元II 被读成 心智单元）。
+        "I" 字形是两条短竖线，位于名条 rel x≈106~119；用尾部区域的
+        竖线计数兜底判定：列内连续白 run ≥ max(8, 0.55×文字高) 的列
+        达到 2 列即视为 II。
+
+        Args:
+            label_image (np.ndarray): 名条图（高 38、宽 124，RGB）
+
+        Returns:
+            bool
+        """
+        white = ((label_image[:, :, 0] > 200) & (label_image[:, :, 1] > 200)
+                 & (label_image[:, :, 2] > 200))
+        width = white.shape[1]
+        runs = [cls._column_run(white[:, i]) for i in range(width)]
+        text_h = max(runs) if runs else 0
+        need = max(8, 0.55 * text_h)
+        return sum(1 for i in range(100, min(124, width)) if runs[i] >= need) >= 2
+
+    def _resolve_prefix_name(self, matched, label):
+        """
+        OCR 丢失尾部字符时用像素判定补全：白名单中存在以 matched 为
+        前缀的更长名称（心智单元 -> 心智单元II）且名条尾部确有 II 时
+        归入更长名称。只对互为前缀的名称对生效，不硬编码物品名。
+        """
+        for item in WHITELIST:
+            item_n = normalize(item)
+            if len(item_n) <= len(matched) or not item_n.startswith(matched):
+                continue
+            if item_n.endswith('II') and self._has_ii_suffix(label):
+                return item
+        return matched
 
     def wait_settled(self, timeout=None):
         """
@@ -337,15 +513,15 @@ class MaterialScanner(StorageUI):
             image (np.ndarray): 截图
 
         Returns:
-            dict: {(白名单名, 品质): amount}，品质 'gold'/'purple'/'other'；
+            list: [(白名单名, 品质, 数量)]，品质 'gold'/'purple'/'other'；
+            同页多个格子各自保留（同一物品多格不会被覆盖）；
             无行检出（页面处于过渡态/行都在遮挡区）返回 None
         """
         bars = self.detect_name_bars(image)
         if not bars:
             return None
         labels = []
-        amounts = []
-        cells = []  # (x, icon_top) 用于品质检测
+        cells = []  # (x, icon_top) 用于品质与数量读取
         for y1 in bars:
             for ci in range(self.GRID_COLS):
                 x = self.GRID_X0 + ci * self.GRID_DX
@@ -360,49 +536,40 @@ class MaterialScanner(StorageUI):
                 if int(label.max()) - int(label.min()) <= 30:
                     continue
                 labels.append(label)
-                amounts.append(image[icon_top + self.AMOUNT_AREA[1]:icon_top + self.AMOUNT_AREA[3],
-                                     x + self.AMOUNT_AREA[0]:x + self.AMOUNT_AREA[2]])
                 cells.append((x, icon_top))
         if not labels:
-            return {}
+            return []
         names = self.ocr_name.ocr(labels, direct_ocr=True)
-        amts = self.ocr_amount.ocr(amounts, direct_ocr=True)
-        if len(names) != len(labels) or len(amts) != len(labels):
+        if len(names) != len(labels):
             # cnocr 极端情况下仍可能丢结果，防御性对齐
-            logger.warning('MaterialScanner: ocr length mismatch %d/%d/%d',
-                           len(names), len(amts), len(labels))
+            logger.warning('MaterialScanner: ocr length mismatch %d/%d',
+                           len(names), len(labels))
 
-        def quality_of(i):
-            x, icon_top = cells[i]
-            return self.cell_quality(image, x, icon_top)
+        qualities = [self.cell_quality(image, x, icon_top) for x, icon_top in cells]
+        amounts = [self.read_amount(image, x, icon_top) for x, icon_top in cells]
 
-        found = {}
+        found = []
         retry_idx = []
-        for i, (n, a) in enumerate(zip(names, amts)):
-            matched = match_whitelist(n, quality_of(i))
+        for i, n in enumerate(names):
+            matched = match_whitelist(n, qualities[i])
             if not matched:
                 retry_idx.append(i)
                 continue
-            try:
-                amount = int(a)
-            except (ValueError, TypeError):
-                continue  # 数量读不出，留给其他页补充
-            if amount > 0:
-                found[(matched, quality_of(i))] = amount
+            # cnocr 丢尾部 "II" 时用名条像素判定兜底
+            matched = self._resolve_prefix_name(matched, labels[i])
+            if amounts[i] > 0:
+                found.append((matched, qualities[i], amounts[i]))
         # 第二遍宽松阈值重试未命中的格子
         if retry_idx:
             retry_labels = [labels[i] for i in retry_idx]
             retry_names = self.ocr_name_retry.ocr(retry_labels, direct_ocr=True)
             for i, n in zip(retry_idx, retry_names):
-                matched = match_whitelist(n, quality_of(i))
+                matched = match_whitelist(n, qualities[i])
                 if not matched:
                     continue
-                try:
-                    amount = int(amts[i])
-                except (ValueError, TypeError):
-                    continue
-                if amount > 0:
-                    found[(matched, quality_of(i))] = amount
+                matched = self._resolve_prefix_name(matched, labels[i])
+                if amounts[i] > 0:
+                    found.append((matched, qualities[i], amounts[i]))
         return found
 
     def swipe_next(self, distance=None):
@@ -447,7 +614,7 @@ class MaterialScanner(StorageUI):
             whitelist (list[str]): 物品名列表，默认使用模块 WHITELIST
 
         Returns:
-            dict: {物品名: 数量}，同名多品质物品已加品质后缀
+            dict: {物品名: 数量}，同名多品质物品按 display_name 映射
         """
         global WHITELIST
         if whitelist:
@@ -456,18 +623,69 @@ class MaterialScanner(StorageUI):
         self.reach_top()
         self._scan_pass(self.MAX_PAGE)
         # 顶部几行只在开头出现，若被遮挡区裁掉或当时误读则没有机会
-        # 修正；扫到过物品但未集齐时回顶补扫几页，靠跨页票数共识纠正。
-        # 一无所获（如小号没有白名单物品）不补扫，避免重复空扫
-        if self.votes and len({name for name, _ in self.votes}) < len(WHITELIST):
+        # 修正；扫到过物品但仍有未确认名称时回顶补扫几页，靠跨页票数
+        # 共识纠正。一无所获（如小号没有白名单物品）不补扫，避免重复空扫
+        if self.votes and len(self._confirmed_names()) < len(WHITELIST):
             logger.info('MaterialScanner: top rescue pass')
             self.reach_top()
             self._scan_pass(8, label='r')
         return self.get_records()
 
+    @staticmethod
+    def _merge_amounts(amounts):
+        """
+        尾缀合并：行位于屏幕边缘或锚点偏移时数量区会被裁掉首位
+        （实测 2257 读成 257、2900 读成 900），互为"尾缀"的读数把
+        票数并给更长值（43 与 243 视为对 243 的一次确认）。
+
+        Args:
+            amounts (dict): {数量: 票数}
+
+        Returns:
+            dict: 合并后的 {数量: 票数}
+        """
+        merged = dict(amounts)
+        for shorter in sorted(merged, key=lambda v: len(str(v))):
+            if shorter <= 0:
+                continue
+            for longer in list(merged):
+                if longer != shorter and len(str(longer)) > len(str(shorter)) \
+                        and str(longer).endswith(str(shorter)):
+                    merged[longer] += merged.pop(shorter)
+                    break
+        return merged
+
+    def _confirmed_counts(self):
+        """
+        各名称的合并后票数（跨品质汇总）。
+
+        Returns:
+            dict: {名称: {数量: 票数}}
+        """
+        by_name = {}
+        for (name, _), amounts in self.votes.items():
+            agg = by_name.setdefault(name, {})
+            for amount, count in amounts.items():
+                agg[amount] = agg.get(amount, 0) + count
+        return {name: self._merge_amounts(amounts)
+                for name, amounts in by_name.items()}
+
+    def _confirmed_names(self):
+        """
+        已确认的名称集合：合并后只剩一个数量，且该数量至少被读到
+        2 次（多页共识）。单页单次读数（如 C 10-25 舰炮研发图只被
+        读过 1 页 883）不算确认，避免单次误读触发提前停扫。
+
+        Returns:
+            set: 名称集合
+        """
+        return {name for name, amounts in self._confirmed_counts().items()
+                if len(amounts) == 1 and sum(amounts.values()) >= 2}
+
     def _scan_pass(self, max_pages, label='p'):
         """
         从当前位置向下逐页扫描一程，终止条件（按优先级）：
-        1. 集齐白名单
+        1. 集齐白名单（每个名称均有 ≥2 次一致读数才算确认）
         2. 连续 3 页无新增白名单物品（物品都在靠前位置，
            再翻只是重复内容；小号没有白名单物品时快速停）
         3. 连续 3 页检不出名称横条（空仓库/页面到底）
@@ -478,7 +696,7 @@ class MaterialScanner(StorageUI):
         unchanged = 0      # 到底判定：滑动后画面不变计数
         no_progress = 0    # 无新增物品计数
         no_bars = 0        # 检不出名称横条计数
-        known = set()      # 本程已见过的 (名, 品质) 组合
+        known = set()      # 本程已见过的 (名, 品质, 数量) 组合
         for _ in range(max_pages):
             # 长循环反复滑动属于合法场景，清空点击保护计数
             self.device.click_record_clear()
@@ -500,12 +718,14 @@ class MaterialScanner(StorageUI):
             no_bars = 0
             # 同一物品跨多页出现（翻页重叠），偶发 OCR 误读/品质
             # 截断误配（如金框部件T5 吞数字后形似部件T4）只会
-            # 出现在单页；按出现页数投票取共识值
-            for key, amount in found.items():
+            # 出现在单页；按出现页数投票取共识值。同页多个格子
+            # 各自计票，不用覆盖式 dict（否则先读到的真值被覆盖）
+            for name, quality, amount in found:
+                key = (name, quality)
                 self.votes.setdefault(key, {}).setdefault(amount, 0)
                 self.votes[key][amount] += 1
             # 按白名单基础名计数（同名金/紫只算一种），集齐提前终止
-            covered = len({name for name, _ in self.votes})
+            covered = len(self._confirmed_names())
             logger.info('MaterialScanner: page found %s (covered %d/%d)',
                         found or '-', covered, len(WHITELIST))
             if covered >= len(WHITELIST):
@@ -542,40 +762,31 @@ class MaterialScanner(StorageUI):
         整理扫描结果：
         - 尾缀合并：行位于屏幕边缘或锚点偏移时数量区会被裁掉首位
           （实测 2257 读成 257、2900 读成 900），互为"尾缀"的
-          读数把票数并给更长值再计票
+          读数把票数并给更长值再计票，治截断
         - 品质按数量分组：品质偶发翻转（紫/其他 边框色相近）但数量
-          一致的读数合并为一条；同一名字出现多个互不相同的数量
-          （真正的金/紫同名物品）才分开，按主导品质加后缀
+          一致的读数合并为一条；quality 只用于 display_name 的档位映射
+        - 每个名称输出恰好一条（同页同名多格已各自计票，取合并后
+          票数最高者；平票取较大值并告警）
 
         Returns:
             dict: {物品名: 数量}
         """
+        out = {}
         # name -> {amount: {quality: count}}
         by_name = {}
-        for (name, quality), amounts in self.votes.items():
-            merged = dict(amounts)
-            for shorter in sorted(merged, key=lambda v: len(str(v))):
-                if shorter <= 0:
-                    continue
-                for longer in list(merged):
-                    if longer != shorter and len(str(longer)) > len(str(shorter)) \
-                            and str(longer).endswith(str(shorter)):
-                        merged[longer] += merged.pop(shorter)
-                        break
-            if len(merged) > 1:
-                logger.info('StorageScan votes: %s(%s) %s', name, quality, dict(merged))
-            for amount, count in merged.items():
-                by_name.setdefault(name, {}).setdefault(amount, {})[quality] = count
-        out = {}
-        for name, groups in by_name.items():
-            if len(groups) == 1:
-                amount, quals = next(iter(groups.items()))
-                quality = max(quals.items(), key=lambda kv: kv[1])[0]
-                out[display_name(name, quality)] = amount
-                continue
-            for amount, quals in groups.items():
-                quality, _ = max(quals.items(), key=lambda kv: kv[1])
-                out[display_name(name, quality, suffix=True)] = amount
+        for (name, quality), votes in self.votes.items():
+            for amount, count in self._merge_amounts(votes).items():
+                quals = by_name.setdefault(name, {}).setdefault(amount, {})
+                quals[quality] = quals.get(quality, 0) + count
+        for name, by_amount in by_name.items():
+            totals = {amount: sum(quals.values())
+                      for amount, quals in by_amount.items()}
+            if len(totals) > 1:
+                logger.warning('StorageScan votes: %s %s', name, totals)
+            # 合并后仍多候选（平票）取较大值；正常应在截断合并时已消解
+            amount = max(totals, key=lambda a: (totals[a], a))
+            quality = max(by_amount[amount].items(), key=lambda kv: kv[1])[0]
+            out[display_name(name, quality)] = amount
         return out
 
     def save_records(self, time: str = None):
