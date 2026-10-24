@@ -5,7 +5,7 @@ import subprocess
 import psutil
 
 from deploy.Windows.utils import DataProcessInfo
-from module.base.decorator import run_once
+from module.base.decorator import del_cached_property, run_once
 from module.base.timer import Timer
 from module.device.connection import AdbDeviceWithStatus
 from module.device.platform.platform_base import PlatformBase
@@ -208,6 +208,33 @@ class PlatformWindows(PlatformBase, EmulatorManager):
         logger.error(f'Emulator function {func.__name__}() failed')
         return False
 
+    def refresh_serial_by_name(self):
+        """
+        按实例名重新枚举，返回模拟器当前真实的 adb 端口。
+
+        MuMu 每次启动都会重写 .nemu 里的 ADB_PORT（实测同一天内端口会在两个值之间来回换），
+        此时按 serial 已经找不到实例，只能按 name 匹配。
+
+        Returns:
+            str | None: 当前 serial，找不到实例时返回 None
+        """
+        name = self.emulator_info.name
+        if not name:
+            return None
+        # all_emulator_instances / all_emulator_serials 都是 cached_property，
+        # 不清缓存就永远读到启动前枚举出来的旧端口
+        del_cached_property(self, 'all_emulator_instances')
+        del_cached_property(self, 'all_emulator_serials')
+        try:
+            instances = self.all_emulator_instances
+        except Exception as e:
+            logger.info(e)
+            return None
+        for instance in instances:
+            if instance.name == name:
+                return instance.serial
+        return None
+
     def emulator_start_watch(self):
         """
         Returns:
@@ -246,6 +273,8 @@ class PlatformWindows(PlatformBase, EmulatorManager):
 
         interval = Timer(0.5).start()
         timeout = Timer(180).start()
+        progress_timer = Timer(10).start()
+        serial_timer = Timer(10).start()
         new_window = 0
         while 1:
             interval.wait()
@@ -266,6 +295,12 @@ class PlatformWindows(PlatformBase, EmulatorManager):
 
             # Check device connection
             devices = self.list_device().select(serial=serial)
+            if progress_timer.reached():
+                progress_timer.reset()
+                logger.info(
+                    f'Waiting emulator online {int(timeout.current_time())}s/180s: {serial} '
+                    f'(devices: {[d.serial for d in devices] if devices else "none"})'
+                )
             # logger.info(devices)
             if devices:
                 device: AdbDeviceWithStatus = devices.first_or_none()
@@ -277,6 +312,18 @@ class PlatformWindows(PlatformBase, EmulatorManager):
                     adb_connect()
                     continue
             else:
+                # 启动期间 MuMu 会重写 .nemu 里的 ADB_PORT，启动前的端口可能已经变了，
+                # 只认启动前快照的 serial 会一直连到 180s 超时。按实例名重发现，节流 10 秒。
+                if serial_timer.reached():
+                    serial_timer.reset()
+                    new_serial = self.refresh_serial_by_name()
+                    if new_serial and new_serial != serial:
+                        logger.warning(f'Emulator serial changed: {serial} -> {new_serial}')
+                        serial = new_serial
+                        # adb_connect() 用的是 self.serial，必须同步改掉
+                        self.config.Emulator_Serial = self.serial = new_serial
+                        del_cached_property(self, 'emulator_instance')
+                        del_cached_property(self, 'adb')
                 # Try to connect
                 adb_connect()
                 continue
