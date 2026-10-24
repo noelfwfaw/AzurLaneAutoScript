@@ -1310,6 +1310,10 @@
     "TimeLimit": {
       "name": "活动时间限制",
       "help": "当本地时间超过给定数值后，禁用所有活动任务，'2020-01-01 00:00:00' 表示不限制，触发一次后时间将被重置\n设置后能防止活动结束后忘记关闭任务的事情发生"
+    },
+    "GearSkinStatistic": {
+      "name": "外观装备统计",
+      "help": "开启后，随仓库扫描(StorageScan)任务一并执行：进入活动商店打开外观装备箱详情，统计当期各外观装备的拥有数量，并与仓库扫描记录同一时间落盘到 工具-数据统计 页面\n非活动期间自动跳过；需要活动商店内存在外观装备箱（价格 2000、限购 10 的物品）"
     }
   },
   "TaskBalancer": {
@@ -3419,7 +3423,15 @@
       "Date": "日期",
       "Total": "合计",
       "CubeTotal": "魔方总数",
-      "GemTotal": "钻石总数"
+      "GemTotal": "钻石总数",
+      "GearSkin": "外观装备统计",
+      "GearSkinLatest": "最新统计",
+      "GearSkinBox": "箱",
+      "GearSkinAmount": "拥有",
+      "GearSkinChange": "较上次",
+      "GearSkinKinds": "已获得种类",
+      "GearSkinTotal": "拥有总数",
+      "GearSkinHistory": "统计历史"
     },
     "AddAlas": {
       "PopupTitle": "添加新配置",

@@ -1307,6 +1307,10 @@
     "TimeLimit": {
       "name": "EventGeneral.TimeLimit.name",
       "help": "EventGeneral.TimeLimit.help"
+    },
+    "GearSkinStatistic": {
+      "name": "外観装備統計",
+      "help": "有効にすると倉庫スキャン(StorageScan)タスクと一緒に実行されます：イベントショップで外観装備箱の詳細を開き、今回のイベントの各外観装備の所持数を集計し、倉庫スキャンの記録と同じタイムスタンプで ツール-データ統計 ページに保存します\nイベント期間外は自動的にスキップされます。イベントショップに外観装備箱（価格 2000、購入上限 10）が必要です"
     }
   },
   "TaskBalancer": {
@@ -3416,7 +3420,15 @@
       "Date": "日付",
       "Total": "合計",
       "CubeTotal": "魔方在庫",
-      "GemTotal": "ダイヤ在庫"
+      "GemTotal": "ダイヤ在庫",
+      "GearSkin": "外観装備統計",
+      "GearSkinLatest": "最新統計",
+      "GearSkinBox": "箱",
+      "GearSkinAmount": "所持数",
+      "GearSkinChange": "前回比",
+      "GearSkinKinds": "獲得種類",
+      "GearSkinTotal": "所持総数",
+      "GearSkinHistory": "統計履歴"
     },
     "AddAlas": {
       "PopupTitle": "新しいコンフィグを追加",

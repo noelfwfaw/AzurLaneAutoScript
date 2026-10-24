@@ -1310,6 +1310,10 @@
     "TimeLimit": {
       "name": "活動時間限制",
       "help": "當本地時間超過給定數值後，禁用所有活動任務，'2020-01-01 00:00:00' 表示不限制，觸發一次後時間將被重置\n設定後能防止活動結束後忘記關閉任務的事情發生"
+    },
+    "GearSkinStatistic": {
+      "name": "外觀裝備統計",
+      "help": "開啟後，隨倉庫掃描(StorageScan)任務一併執行：進入活動商店打開外觀裝備箱詳情，統計當期各外觀裝備的擁有數量，並與倉庫掃描記錄同一時間落盤到 工具-數據統計 頁面\n非活動期間自動跳過；需要活動商店內存在外觀裝備箱（價格 2000、限購 10 的物品）"
     }
   },
   "TaskBalancer": {
@@ -3419,7 +3423,15 @@
       "Date": "日期",
       "Total": "合計",
       "CubeTotal": "魔方總數",
-      "GemTotal": "鑽石總數"
+      "GemTotal": "鑽石總數",
+      "GearSkin": "外觀裝備統計",
+      "GearSkinLatest": "最新統計",
+      "GearSkinBox": "箱",
+      "GearSkinAmount": "擁有",
+      "GearSkinChange": "較上次",
+      "GearSkinKinds": "已獲得種類",
+      "GearSkinTotal": "擁有總數",
+      "GearSkinHistory": "統計歷史"
     },
     "AddAlas": {
       "PopupTitle": "添加新的設定",

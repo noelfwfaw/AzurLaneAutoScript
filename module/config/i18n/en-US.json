@@ -1307,6 +1307,10 @@
     "TimeLimit": {
       "name": "Event Time Limit",
       "help": "When the local time exceeds the given value, disable all event tasks. '2020-01-01 00:00:00' means no limit and the time will be reset once it's triggered\nThis can prevent the occurrence of forgetting to disable event tasks after the event ends"
+    },
+    "GearSkinStatistic": {
+      "name": "Gear Skin Statistics",
+      "help": "When enabled, it runs together with the StorageScan task: goes to the event shop, opens the gear skin boxes and counts the amount owned of each gear skin of the current event, then saves the result with the same timestamp as the storage scan record to Tools - Statistics\nAutomatically skipped outside the event period; requires gear skin boxes (price 2000, limit 10) in the event shop"
     }
   },
   "TaskBalancer": {
@@ -3416,7 +3420,15 @@
       "Date": "Date",
       "Total": "Total",
       "CubeTotal": "Cube Stock",
-      "GemTotal": "Gem Stock"
+      "GemTotal": "Gem Stock",
+      "GearSkin": "Gear Skin Statistics",
+      "GearSkinLatest": "Latest Statistics",
+      "GearSkinBox": "Box",
+      "GearSkinAmount": "Owned",
+      "GearSkinChange": "Since Last",
+      "GearSkinKinds": "Kinds Owned",
+      "GearSkinTotal": "Total Owned",
+      "GearSkinHistory": "Statistics History"
     },
     "AddAlas": {
       "PopupTitle": "Add new config",

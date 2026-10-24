@@ -578,10 +578,13 @@ class MaterialScanner(StorageUI):
                 out[display_name(name, quality, suffix=True)] = amount
         return out
 
-    def save_records(self):
+    def save_records(self, time: str = None):
         """
         保存扫描结果 JSON（历史记录追加模式）。
         按实例名分目录存储，多实例（大小号）互不干扰。
+
+        Args:
+            time (str): 记录时间串，None 时取当前时间
 
         Returns:
             str: 文件路径
@@ -597,7 +600,7 @@ class MaterialScanner(StorageUI):
             except (ValueError, OSError):
                 history = []
         history.append({
-            'time': datetime.now().isoformat(timespec='seconds'),
+            'time': time if time is not None else datetime.now().isoformat(timespec='seconds'),
             'items': [
                 {'name': k, 'amount': v}
                 for k, v in sorted(self.get_records().items())
@@ -627,7 +630,19 @@ class MaterialScanner(StorageUI):
             logger.hr('Storage scan results', level=1)
             for name, amount in sorted(records.items()):
                 logger.attr(name, amount)
-            self.save_records()
+            scan_time = datetime.now().isoformat(timespec='seconds')
+            self.save_records(time=scan_time)
+            # 外观装备统计与仓库扫描同一任务、同一时间戳；
+            # 自身吞掉所有异常，任何失败都不影响仓库扫描结果与 task_delay。
+            if self.config.EventGeneral_GearSkinStatistic:
+                try:
+                    from module.gear_skin.gear_skin import GearSkinScanner
+                    result = GearSkinScanner(self.config, self.device).run(scan_time=scan_time)
+                    if result:
+                        logger.hr('Gear skin statistics', level=2)
+                        logger.info(f'Gear skin statistic saved, see {OUTPUT_FOLDER}/{self.config.config_name}/gear_skin.json')
+                except Exception as e:
+                    logger.warning(f'GearSkinStatistic failed, storage scan result unaffected: {e}')
         except Exception:
             # 失败也要推迟（FailureInterval），防止调度器立刻重试死循环
             self.config.task_delay(success=False)

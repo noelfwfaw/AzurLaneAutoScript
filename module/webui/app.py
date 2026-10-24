@@ -584,6 +584,7 @@ class AlasGUI(Frame):
 
         with use_scope("statistics"):
             self.alas_storage_scan()
+            self.alas_gear_skin()
 
             try:
                 from module.statistics.statistics import DailyIncome
@@ -786,6 +787,92 @@ class AlasGUI(Frame):
                         for scan in reversed(history[-7:])
                     ],
                     header=["Time"] + [""] * 7,
+                )
+            ],
+            open=False,
+        )
+
+    def alas_gear_skin(self) -> None:
+        """
+        Render gear skin statistics
+        (log/storage_scan/<instance>/gear_skin.json):
+        latest snapshot grouped by box with change since previous statistics,
+        and a collapsible history of recent statistics.
+        """
+        path = os.path.join(
+            "log", "storage_scan", self.alas_config.config_name, "gear_skin.json")
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return
+        history = data.get("records", []) if isinstance(data, dict) else []
+        # Only statistics with captured boxes are useful
+        history = [h for h in history if h.get("boxes")]
+        if not history:
+            return
+
+        put_html('<hr class="hr-group">')
+        put_text(t("Gui.Statistics.GearSkin")).style(
+            "font-weight: 700; margin: .3rem 0;")
+
+        latest = history[-1]
+        prev = history[-2] if len(history) >= 2 else None
+        prev_amounts = {}
+        if prev:
+            for box in prev.get("boxes", []):
+                for skin in box.get("skins", []):
+                    prev_amounts[(box.get("box"), skin.get("name"))] = skin.get("amount", 0)
+
+        put_text(
+            f'{t("Gui.Statistics.GearSkinLatest")} {latest.get("time", "")}  '
+            f'{t("Gui.Statistics.GearSkinTotal")}: {latest.get("total", 0)}  '
+            f'{t("Gui.Statistics.GearSkinKinds")}: {latest.get("kinds", 0)}'
+        ).style("margin: .3rem 0;")
+
+        def box_total(box):
+            return sum(skin.get("amount", 0) for skin in box.get("skins", []))
+
+        for box in latest.get("boxes", []):
+            box_name = box.get("box", "")
+            rows = []
+            for skin in box.get("skins", []):
+                name = skin.get("name", "")
+                amount = skin.get("amount", 0)
+                old = prev_amounts.get((box_name, name))
+                if old is None or old == amount:
+                    change = "-"
+                else:
+                    delta = amount - old
+                    color = "#4caf50" if delta > 0 else "#ef5350"
+                    change = f'<span style="color: {color};">{delta:+d}</span>'
+                rows.append([name, str(amount), put_html(change)])
+            put_table(
+                rows,
+                header=[f'{box_name} ({t("Gui.Statistics.GearSkinTotal")}: {box_total(box)})',
+                        t("Gui.Statistics.GearSkinAmount"),
+                        t("Gui.Statistics.GearSkinChange")],
+            ).style("margin: .3rem 0 .3rem 0; width: 100%;")
+
+        # Recent statistics history
+        recent = list(reversed(history[-7:]))
+        max_boxes = max(len(record.get("boxes", [])) for record in recent)
+        put_collapse(
+            title=t("Gui.Statistics.GearSkinHistory"),
+            content=[
+                put_table(
+                    [
+                        [record.get("time", ""),
+                         str(record.get("total", 0)),
+                         str(record.get("kinds", 0))]
+                        + [str(box_total(box)) for box in record.get("boxes", [])]
+                        for record in recent
+                    ],
+                    header=["Time", t("Gui.Statistics.GearSkinTotal"),
+                            t("Gui.Statistics.GearSkinKinds")]
+                    + [f'{t("Gui.Statistics.GearSkinBox")} {i + 1}' for i in range(max_boxes)],
                 )
             ],
             open=False,
