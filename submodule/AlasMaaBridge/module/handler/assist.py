@@ -33,6 +33,21 @@ TEMPLATES = {
     'assist_panel': (430, 163, 620, 196),
 }
 
+# 点击点可独立于模板区。太阳图标本身是「昼夜切换」，点它会切到夜晚模式并让模板失配；
+# 灵动岛的本体是那条白色圆角条 (572, 14, 706, 52)，太阳图标只占左边的 (584, 16, 618, 52)。
+CLICK_POINTS = {
+    'assist_sun': (639, 33),
+    # 「隐藏灵动岛」那一行的实际位置比模板区偏下（模板区落在分区标题上，点了没反应）
+    'assist_hide': (640, 530),
+}
+
+# 点灵动岛没打开面板时的备用点：仍在白色圆角条上，避开太阳图标与右侧图标
+ISLAND_POINTS = [(639, 33), (660, 33)]
+
+# 点击前后画面差异的均值阈值。连续两次截图（不点击）实测噪声约 0.03，
+# 点开面板约 34，这里取 3 足够区分「这一下没生效」与「开了」。
+CHANGE_THRESHOLD = 3.0
+
 
 def imread_gray(path):
     """
@@ -182,9 +197,26 @@ class MaaAssist:
                     logger.info(f'声明页向下滚动 {swipe_times}/{self.MAX_SWIPE}')
                     self.swipe(*self.SCROLL)
                     continue
-                logger.info(f'OPEN_ISLAND score={score["assist_sun"]:.3f}')
-                self.click('assist_sun')
-                opened = True
+
+                # 点白条而不是模板中心（模板中心是太阳图标，那是昼夜切换）
+                for index, point in enumerate(ISLAND_POINTS):
+                    logger.info(
+                        f'OPEN_ISLAND score={score["assist_sun"]:.3f} tap={point[0]},{point[1]}'
+                    )
+                    after = self.tap(*point)
+                    # 声明页顶部只有正文（同意按钮在页底），模板一个都匹配不上；
+                    # 灵动岛又是悬浮层，面板打开后 assist_sun 照样匹配。
+                    # 所以「模板命中」或「画面变了」都算打开成功。
+                    if (self.panel_visible(self.scores(after))
+                            or self.changed(image, after)):
+                        opened = True
+                        break
+                    logger.info(
+                        f'灵动岛未打开，换点重试（{index + 1}/{len(ISLAND_POINTS)}）'
+                    )
+                else:
+                    logger.warning('辅助启动: failed（点击灵动岛后仍未打开面板）')
+                    return False
                 continue
 
             logger.info('辅助启动: skipped（未检测到灵动岛）')
@@ -234,13 +266,80 @@ class MaaAssist:
         result = cv2.matchTemplate(gray, self.templates[name], cv2.TM_CCOEFF_NORMED)
         return float(cv2.minMaxLoc(result)[1])
 
+    def scores(self, image=None):
+        """
+        Args:
+            image (np.ndarray): BGR 图像，不传则重新截图
+
+        Returns:
+            dict: 所有模板的匹配分数
+        """
+        if image is None:
+            image = self.screenshot()
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        return {name: self.match(gray, name) for name in self.templates}
+
+    def changed(self, before, after):
+        """
+        点击前后画面是否有变化，用来判断这一下点击有没有生效。
+
+        Returns:
+            bool:
+        """
+        a = cv2.cvtColor(before, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        b = cv2.cvtColor(after, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        return float(np.abs(a - b).mean()) > CHANGE_THRESHOLD
+
+    def panel_visible(self, score):
+        """
+        面板 / 声明 / 密码 / 设置任一按钮出现。
+
+        注意声明页顶部（只有正文时）一个按钮都匹配不上，此时用 changed() 判断。
+
+        Returns:
+            bool:
+        """
+        return (
+            score['assist_agree'] >= self.THRESHOLD
+            or score['assist_enter'] >= self.THRESHOLD
+            or score['assist_hide'] >= self.THRESHOLD
+            or (score['assist_panel'] >= self.THRESHOLD
+                and score['assist_gear'] >= self.THRESHOLD_GEAR)
+        )
+
     def click(self, name):
+        if name in CLICK_POINTS:
+            return self.tap(*CLICK_POINTS[name])
         x1, y1, x2, y2 = TEMPLATES[name]
         x = random.randint(x1 + 4, x2 - 4)
         y = random.randint(y1 + 4, y2 - 4)
+        return self.tap(x, y)
+
+    def tap(self, x, y):
+        """
+        Returns:
+            np.ndarray: 点击后稳定下来的画面
+        """
         self.emulator.shell(self.serial, f'input tap {x} {y}')
-        time.sleep(0.5)
+        return self.wait_stable()
 
     def swipe(self, x1, y1, x2, y2, duration):
         self.emulator.shell(self.serial, f'input swipe {x1} {y1} {x2} {y2} {duration}')
-        time.sleep(1.0)
+        self.wait_stable()
+
+    def wait_stable(self, timeout=6.0):
+        """
+        等画面稳定再返回。
+
+        点击后页面有转场动画，太早截图会拿到「一个按钮都没有」的中间帧，
+        状态机会误以为需要滑动，从而把刚打开的设置页滑走。
+        """
+        image = self.screenshot()
+        timer = Timer(timeout).start()
+        while not timer.reached():
+            time.sleep(0.4)
+            cur = self.screenshot()
+            if not self.changed(image, cur):
+                return cur
+            image = cur
+        return image
