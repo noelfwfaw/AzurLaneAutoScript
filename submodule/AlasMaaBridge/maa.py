@@ -850,6 +850,13 @@ class ArknightsAutoScript(AzurLaneAutoScript):
 
     def maa_startup(self):
         AssistantHandler(config=self.config, asst=self.asst).startup()
+        # 魔改客户端进游戏后会有悬浮面板挡住识别区域，这里顺手关掉。
+        # 失败只打日志，不影响后续任务（面板的问题让用户自己处理）
+        self.maa_assist_island()
+
+    def maa_assist_island(self):
+        from submodule.AlasMaaBridge.module.handler.assist import MaaAssist
+        MaaAssist(self.config).run()
 
     def maa_annihilation(self):
         AssistantHandler(config=self.config, asst=self.asst).fight()

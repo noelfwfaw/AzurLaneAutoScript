@@ -12,6 +12,7 @@ Maa:
       - MaaEmulator
       - MaaRecord
       - MaaUpdate
+      - MaaAssist
       - Emulator
       - Error
       - Optimization

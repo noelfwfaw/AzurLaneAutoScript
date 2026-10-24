@@ -216,6 +216,16 @@
       "Nightly": "Nightly"
     }
   },
+  "MaaAssist": {
+    "_info": {
+      "name": "Assist startup",
+      "help": "Floating panel of modded clients: after every \"Start up\" it taps the dynamic island, walks through the disclaimer / assist password flow and hides the floating window"
+    },
+    "Enable": {
+      "name": "Enable assist startup",
+      "help": "Disabled by default, only needed when the client shows the dynamic island panel\nSkipped when no dynamic island is detected, later tasks are not affected\nThe client must be 1280x720"
+    }
+  },
   "MaaFight": {
     "_info": {
       "name": "Combat",

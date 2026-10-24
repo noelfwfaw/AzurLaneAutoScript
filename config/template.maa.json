@@ -18,6 +18,9 @@
       "UpdatePackage": false,
       "VersionType": "Stable"
     },
+    "MaaAssist": {
+      "Enable": false
+    },
     "Emulator": {
       "ServerName": "disabled"
     },

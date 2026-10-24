@@ -67,6 +67,9 @@ MaaUpdate:
     value: Stable
     option: [ Stable, Beta, Nightly ]
 
+MaaAssist:
+  Enable: false
+
 MaaFight:
   Stage:
     value: last

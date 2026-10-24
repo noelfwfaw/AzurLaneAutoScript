@@ -74,6 +74,12 @@
         ]
       }
     },
+    "MaaAssist": {
+      "Enable": {
+        "type": "checkbox",
+        "value": false
+      }
+    },
     "Emulator": {
       "ServerName": {
         "type": "input",
