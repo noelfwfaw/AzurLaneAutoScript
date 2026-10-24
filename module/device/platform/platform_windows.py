@@ -271,6 +271,10 @@ class PlatformWindows(PlatformBase, EmulatorManager):
         def show_package(m):
             logger.info(f'Found azurlane packages: {m}')
 
+        @run_once
+        def show_boot_wait(m):
+            logger.info(f'Waiting system boot completed: {m}')
+
         interval = Timer(0.5).start()
         timeout = Timer(180).start()
         progress_timer = Timer(10).start()
@@ -336,6 +340,20 @@ class PlatformWindows(PlatformBase, EmulatorManager):
                 logger.info(e)
                 continue
             show_ping(pong)
+
+            # Check system boot completed
+            # MuMu 的 adb 是 vbox NAT 转发，虚机进程一起来端口就通，`pm list packages`
+            # 也只依赖 package manager，两者都比 boot 完成早得多。不看 sys.boot_completed
+            # 的话，launch 后 10 秒就会被判成「就绪」，随后 nemu_ipc / atx-agent 全连不上。
+            try:
+                boot = self.adb_shell(['getprop', 'sys.boot_completed']).strip()
+            except Exception as e:
+                logger.info(e)
+                continue
+            # 还没 boot 完时 getprop 返回空字符串，不是 '0'
+            if boot != '1':
+                show_boot_wait(boot)
+                continue
 
             # Check azuelane package
             packages = self.list_known_packages(show_log=False)

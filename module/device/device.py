@@ -297,6 +297,7 @@ class Device(Screenshot, Control, AppControl):
         self.nemu_ipc_release()
         self.adb_reconnect()
         del_cached_property(self, 'adb')
+        del_cached_property(self, 'u2')
         logger.critical('Emulator restarted, device is available now')
         return True
 

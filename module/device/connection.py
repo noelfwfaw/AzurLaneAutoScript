@@ -874,6 +874,9 @@ class Connection(ConnectionAttr):
         del_cached_property(self, '_minitouch_builder')
         del_cached_property(self, '_maatouch_builder')
         del_cached_property(self, 'reverse_server')
+        # u2.Device 内部握着 adb forward 的随机端口，adb 连接重建后那条 forward 已经失效，
+        # 不清缓存就会继续往死端口发请求（RemoteDisconnected）
+        del_cached_property(self, 'u2')
 
     def adb_disconnect(self):
         msg = self.adb_client.disconnect(self.serial)

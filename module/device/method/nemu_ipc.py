@@ -208,6 +208,10 @@ def retry(func):
 
 
 class NemuIpcImpl:
+    # 模拟器冷启动到 nemu_connect 可用通常要几十秒，原来 5 次快速重试（约 4 秒）
+    # 覆盖不了，这里按时间窗口重试
+    CONNECT_RETRY_TIMEOUT = 60
+
     def __init__(self, nemu_folder: str, instance_id: int, display_id: int = 0):
         """
         Args:
@@ -275,9 +279,39 @@ class NemuIpcImpl:
         self.connect_id = connect_id
         # logger.info(f'NemuIpc connected: {self.connect_id}')
 
-    @retry
     def connect_with_retry(self, on_thread=True):
-        self.connect(on_thread=on_thread)
+        """
+        按时间窗口重试，而不是按次数。
+
+        模拟器刚被拉起时 nemu 渲染服务还没起来，`nemu_connect` 会持续返回 0；
+        `@retry` 的 5 次重试只撑约 4 秒，不够。这里用 Timer 控 60 秒总时长。
+        """
+        timer = Timer(self.CONNECT_RETRY_TIMEOUT).start()
+        interval = Timer(2).start()
+        while 1:
+            try:
+                self.connect(on_thread=on_thread)
+                if timer.current_time() > 2:
+                    logger.info(f'NemuIpc connected after {int(timer.current_time())}s')
+                return
+            except NemuIpcIncompatible:
+                raise
+            except RequestHumanTakeover:
+                raise
+            except JobTimeout:
+                logger.warning('NemuIpc connect() call timeout, retrying')
+            except NemuIpcError as e:
+                logger.warning(
+                    f'{e} (waited {int(timer.current_time())}s/{self.CONNECT_RETRY_TIMEOUT}s)'
+                )
+            except Exception as e:
+                logger.warning(f'NemuIpc connect() failed: {e}')
+
+            if timer.reached():
+                logger.critical(f'Retry connect() failed after {self.CONNECT_RETRY_TIMEOUT}s')
+                raise RequestHumanTakeover
+            interval.wait()
+            interval.reset()
 
     def disconnect(self):
         if self.connect_id == 0:
