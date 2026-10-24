@@ -2,6 +2,7 @@ import json
 import os
 import re
 import time
+from collections import Counter
 from datetime import datetime
 
 import numpy as np
@@ -19,7 +20,7 @@ OUTPUT_FOLDER = 'log/storage_scan'
 WHITELIST = [
     '特装型突破', '试作型突破',
     '舰炮研发图', '鱼雷研发图', '防空炮研发图', '舰载机研发图', '装备研发图',
-    '绝密实验计划', '特装原型',
+    '绝密实验计划', '机密实验计划', '特装原型',
     '心智单元', '心智单元II',
     '通用部件T4', '主炮部件T4', '鱼雷部件T4', '防空炮部件T4', '舰载机部件T4',
     '喵箱SSR型',
@@ -151,16 +152,12 @@ class MaterialScanner(StorageUI):
     # 上界不宜放宽，图标白色部分会被误读为前导数字
     AMOUNT_AREA = (55, 96, 123, 124)
     AMOUNT_THRESHOLD = 160
-    # 数量徽章几何（实测）：数字右对齐于格右 x+120~123，字高 18px，
-    # 行带 icon_top+101~+118。卡面白色画与数字同为 255 纯白，靠阈值
-    # 无法分开，改为从右往左逐位模板匹配，遇低分即停
-    AMOUNT_BAND_LEFT = 40
-    AMOUNT_BAND_RIGHT = 124
-    AMOUNT_DIGIT_TOP = 101
-    AMOUNT_DIGIT_H = 18
-    AMOUNT_RIGHT_MIN = 118
-    AMOUNT_MATCH_MIN = 0.70
-    AMOUNT_MAX_DIGITS = 6
+    # 数量读取：行锚点 ±2px 抖动会把卡面白底图案推进裁剪窗读成前导
+    # 多余数字，任何固定窗口都躲不开，故对多个纵向偏移各取一次读数
+    AMOUNT_DY = (-3, -2, -1, 0, 1, 2, 3)
+    # 消歧结果是最短候选且存在更长候选时再补采一次（可能全是短值被
+    # 截断的形态，需要更宽的范围才能采到真值）
+    AMOUNT_DY_EXT = (-6, -5, -4, 4, 5, 6)
     # 翻页滑动：内容区上滑约一行。用慢速拖拽（游戏按松手速度区分
     # 拖拽/甩动），基本不产生惯性翻滚，步长稳定 ~190px ≈ 1.07 行，
     # 每行物品稳定跨 2~3 页出现，偶发的单页 OCR 误读由跨页票数共识排除
@@ -181,45 +178,15 @@ class MaterialScanner(StorageUI):
         self.ocr_amount = AmountOcr([], threshold=self.AMOUNT_THRESHOLD, name='SSAmount')
         # 跨页数量共识：(白名单名, 品质) -> {数量: 出现页数}
         self.votes = {}
-        self._templates = None
-
-    def digit_templates(self):
-        """
-        加载 0-9 数字模板（由 dev_tools/storage_scan_replay.py 从冻结截图
-        的已知数量格提取，见 module/storage/amount_digits.json）。
-        模板不可用时退回原裁剪 OCR。
-
-        Returns:
-            dict: {数字字符: [np.ndarray(bool), ...]}
-        """
-        if self._templates is None:
-            path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                'amount_digits.json')
-            try:
-                with open(path, 'r', encoding='utf-8') as f:
-                    raw = json.load(f)
-                # 同一数字保留全部实例：徽章绝对 x 不同导致亚像素栅格化
-                # 有 ±1px 差异，多个实例才能稳定拿到满分匹配
-                self._templates = {
-                    digit: [np.array([[c == '1' for c in line] for line in row],
-                                     dtype=bool)
-                            for row in instances]
-                    for digit, instances in raw.items()
-                }
-            except (OSError, ValueError, KeyError) as e:
-                logger.warning(f'MaterialScanner: digit templates unavailable, '
-                               f'fallback to amount OCR: {e}')
-                self._templates = {}
-        return self._templates
 
     def read_amount(self, image, x, icon_top):
         """
-        读取图标右下角数量。
+        读取图标右下角数量：多偏移取样后按前/后缀关系消歧。
 
-        卡面白色画与数字同为纯白，原裁剪区（AMOUNT_AREA）左侧会混入
-        画的一部分，被 OCR 当成前导数字（960 读成 2960），调阈值无法
-        分离。数量徽章右缘固定在格右 x+120~123、数字右对齐、字距
-        约 13px，改为从右往左逐位模板匹配，连续低分即停。
+        行锚点 ±2px 抖动会把卡面白底图案推进数量裁剪窗，被读成前导
+        多余数字（实测 902->2902、960->2960、933->2933），任何固定
+        裁剪窗都躲不开（9 个偏移全跑、5 种窗口全失败）。而污染恒为
+        "前导字符 + 真值"，故对多个纵向偏移各取一次读数再消歧。
 
         Args:
             image (np.ndarray): 截图
@@ -229,78 +196,124 @@ class MaterialScanner(StorageUI):
         Returns:
             int: 数量；完全读不出为 0
         """
-        templates = self.digit_templates()
-        if templates:
-            amount = self._match_amount(image, x, icon_top, templates)
-            if amount is not None:
-                return amount
-        # 模板缺失或一位都匹配不上时退回原裁剪 OCR
-        area = self.AMOUNT_AREA
-        img = image[icon_top + area[1]:icon_top + area[3], x + area[0]:x + area[2]]
-        try:
-            return int(self.ocr_amount.ocr([img], direct_ocr=True)[0])
-        except (ValueError, TypeError, IndexError):
+        candidates = self._amount_candidates(image, x, icon_top, self.AMOUNT_DY)
+        if not candidates:
             return 0
+        value = self._resolve_amount(candidates)
+        # 最短候选 + 存在更长候选：可能全部是截断形态，扩大采样范围再来一次
+        firm = self._firm_counts(candidates)
+        if value == min(firm) and len({len(str(c)) for c in firm}) > 1:
+            candidates += self._amount_candidates(image, x, icon_top, self.AMOUNT_DY_EXT)
+            value = self._resolve_amount(candidates)
+        return value
 
-    def _match_amount(self, image, x, icon_top, templates):
+    def _amount_candidates(self, image, x, icon_top, offsets):
         """
-        右锚定逐位数字模板匹配。
+        在给定纵向偏移集合上各读一次数量。
+
+        Args:
+            image (np.ndarray): 截图
+            x (int): 格子左上角 x
+            icon_top (int): 图标区顶 y
+            offsets (iterable[int]): 纵向偏移
 
         Returns:
-            int: 匹配出的数量；一位都匹配不上返回 None（交回 OCR）
+            list[int]: 读出的正整数读数（保持偏移顺序）
         """
-        left = x + self.AMOUNT_BAND_LEFT
-        right = x + self.AMOUNT_BAND_RIGHT
-        top = icon_top + self.AMOUNT_DIGIT_TOP
-        # 上下各留 1 行，容忍相位漂移（滑动导致的 1~2px 位移）
-        band = image[top - 1:top + 1 + self.AMOUNT_DIGIT_H, left:right]
-        if band.size == 0:
+        area = self.AMOUNT_AREA
+        height = area[3] - area[1]
+        crops = []
+        for dy in offsets:
+            y0 = icon_top + dy + area[1]
+            crop = image[y0:y0 + height, x + area[0]:x + area[2]]
+            if crop.shape[0] == height:
+                crops.append(crop)
+        if not crops:
+            return []
+        try:
+            results = self.ocr_amount.ocr(crops, direct_ocr=True)
+        except (ValueError, TypeError, IndexError):
+            return []
+        candidates = []
+        for text in results:
+            try:
+                value = int(text)
+            except (ValueError, TypeError):
+                continue
+            if value > 0:
+                candidates.append(value)
+        return candidates
+
+    @staticmethod
+    def _firm_counts(candidates):
+        """
+        只保留被重复读到的候选（票数 ≥2）。
+
+        单票候选多是相位偶发截断/误读（960 的某一偏移读成 60 或 96），
+        若参与消歧会把一位数误判成真值。全部都是单票时原样返回。
+
+        Args:
+            candidates (list[int]): 各偏移的读数
+
+        Returns:
+            dict: {数量: 票数}
+        """
+        counts = Counter(candidates)
+        firm = {value: count for value, count in counts.items() if count >= 2}
+        return firm or counts
+
+    @staticmethod
+    def _resolve_amount(candidates):
+        """
+        同一格多个偏移读数消歧。
+
+        前导污染：短值是长值的后缀（902 ⊂ 2902）→ 短值是真值；
+        尾部截断：短值是长值的前缀（12 ⊂ 123）→ 长值是真值；
+        首尾同时包含（11 ⊂ 111）时按前缀优先取长值。
+        无任何关系时取票数最多者。
+
+        Args:
+            candidates (list[int]): 各偏移的读数（正整数）
+
+        Returns:
+            int: 消歧后的数量
+        """
+        if not candidates:
+            return 0
+        counts = MaterialScanner._firm_counts(candidates)
+        uniq = sorted(counts, key=lambda v: len(str(v)))
+        if len(uniq) == 1:
+            return uniq[0]
+        for short in uniq:
+            for long in uniq:
+                keep = MaterialScanner._merged_value(short, long)
+                if keep is not None:
+                    return keep
+        return max(counts, key=lambda v: (counts[v], len(str(v))))
+
+    @staticmethod
+    def _merged_value(short, long):
+        """
+        两个数量是否为"同一真值的不同读数"，是则返回应保留的值。
+
+        前导污染（长值 = 多余字符 + 短值，短值是后缀）→ 短值是真值；
+        尾部截断（短值是长值的前缀）→ 长值是真值。首尾同时包含
+        （11 ⊂ 111）时前缀优先，避免把长值误当污染丢掉。
+
+        Args:
+            short (int): 位数较短的值
+            long (int): 位数较长的值
+
+        Returns:
+            int | None: 应保留的值；两者无关系时 None
+        """
+        if len(str(long)) <= len(str(short)):
             return None
-        white = ((band[:, :, 0] > 215) & (band[:, :, 1] > 215)
-                 & (band[:, :, 2] > 215))
-        cols = np.where(white.any(axis=0))[0]
-        cols = cols[cols >= x + self.AMOUNT_RIGHT_MIN - left]
-        if not len(cols):
-            return None
-        # 最右白列即末位数字右缘（徽章本身无白边）
-        right_edge = int(cols.max())
-        digits = []
-        cur_left = None
-        for _ in range(self.AMOUNT_MAX_DIGITS):
-            if cur_left is None:
-                lo, hi = right_edge - 13, right_edge
-            else:
-                # 数字按比例宽度紧密排布，相邻字间距 ~2~4px
-                lo, hi = cur_left - 7, cur_left - 1
-            best = None
-            for edge in range(lo, hi + 1):
-                for digit, instances in templates.items():
-                    for tpl in instances:
-                        w = tpl.shape[1]
-                        x0 = edge - w + 1
-                        if x0 < 0 or x0 + w > white.shape[1]:
-                            continue
-                        for dy in (-1, 0, 1):
-                            y0 = 1 + dy
-                            win = white[y0:y0 + tpl.shape[0], x0:x0 + w]
-                            if win.shape != tpl.shape:
-                                continue
-                            union = np.logical_or(win, tpl).sum()
-                            if not union:
-                                continue
-                            score = np.logical_and(win, tpl).sum() / union
-                            # 等分时取更靠右的位置：短线模板（1/7 等）
-                            # 可能在相邻数字的局部区域拿到同分
-                            if best is None or score >= best[0]:
-                                best = (score, digit, edge, x0)
-            if best is None or best[0] < self.AMOUNT_MATCH_MIN:
-                break
-            digits.append(best[1])
-            cur_left = best[3]
-        if not digits:
-            return None
-        # digits 是从右往左匹配出来的，拼回原顺序
-        return int(''.join(reversed(digits)))
+        if str(long).startswith(str(short)):
+            return long
+        if str(long).endswith(str(short)):
+            return short
+        return None
 
     @staticmethod
     def _column_run(white):
@@ -634,9 +647,13 @@ class MaterialScanner(StorageUI):
     @staticmethod
     def _merge_amounts(amounts):
         """
-        尾缀合并：行位于屏幕边缘或锚点偏移时数量区会被裁掉首位
-        （实测 2257 读成 257、2900 读成 900），互为"尾缀"的读数把
-        票数并给更长值（43 与 243 视为对 243 的一次确认）。
+        跨页票数按前/后缀关系合并。
+
+        数量读数的两种形态偏差：
+        - 前导污染：长值是"多余字符+真值"（902 读成 2902）→ 短值是真值
+        - 尾部截断：短值是长值的前缀（12 读成 123 的一半）→ 长值是真值
+        只把短值票并给长值会让前导污染值越并越牢（C 的 883 就是这样
+        固化的），故按关系方向分派；首尾同时包含时前缀优先。
 
         Args:
             amounts (dict): {数量: 票数}
@@ -645,14 +662,18 @@ class MaterialScanner(StorageUI):
             dict: 合并后的 {数量: 票数}
         """
         merged = dict(amounts)
-        for shorter in sorted(merged, key=lambda v: len(str(v))):
-            if shorter <= 0:
+        for short in sorted(list(merged), key=lambda v: len(str(v))):
+            if short <= 0 or short not in merged:
                 continue
-            for longer in list(merged):
-                if longer != shorter and len(str(longer)) > len(str(shorter)) \
-                        and str(longer).endswith(str(shorter)):
-                    merged[longer] += merged.pop(shorter)
-                    break
+            for long in list(merged):
+                if long not in merged:
+                    continue
+                keep = MaterialScanner._merged_value(short, long)
+                if keep is None:
+                    continue
+                drop = long if keep == short else short
+                merged[keep] += merged.pop(drop)
+                break
         return merged
 
     def _confirmed_counts(self):
@@ -845,7 +866,9 @@ class MaterialScanner(StorageUI):
             self.save_records(time=scan_time)
             # 外观装备统计与仓库扫描同一任务、同一时间戳；
             # 自身吞掉所有异常，任何失败都不影响仓库扫描结果与 task_delay。
-            if self.config.EventGeneral_GearSkinStatistic:
+            # StorageScan 任务没有绑定 EventGeneral 组，getattr 恒返回默认 False，
+            # 必须跨组读取；改 task.yaml 会给任务面板塞无关配置
+            if self.config.cross_get(keys='EventGeneral.EventGeneral.GearSkinStatistic', default=False):
                 try:
                     from module.gear_skin.gear_skin import GearSkinScanner
                     result = GearSkinScanner(self.config, self.device).run(scan_time=scan_time)

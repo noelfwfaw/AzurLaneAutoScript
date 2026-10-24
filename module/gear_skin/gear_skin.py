@@ -29,8 +29,11 @@ from module.logger import logger
 from module.ocr.ocr import Ocr
 from module.shop.assets import NAV_EVENT, NAV_GENERAL, SHOP_BUY_CONFIRM, SHOP_CLICK_SAFE_AREA
 from module.shop.ui import ShopUI
+from module.shop_event.assets import NO_NAV_EVENT_CHECK
 from module.shop_event.clerk import EventShopClerk, ItemNotFoundError
 from module.shop_event.ui import EVENT_SHOP_SCROLL
+from module.ui.assets import SHOP_GOTO_MUNITIONS
+from module.ui.page import page_munitions
 
 OCR_EXCHANGE_DETAIL = Ocr(EXCHANGE_DETAIL_BUTTON, lang='cnocr', name='OCR_EXCHANGE_DETAIL')
 OCR_EXCHANGE_TITLE = Ocr(EXCHANGE_TITLE_AREA, lang='cnocr', letter=(232, 200, 90),
@@ -110,22 +113,30 @@ class GearSkinScanner(EventShopClerk, ShopUI):
         """
         守卫一（导航层）与守卫二（时间层）。
 
+        导航层直接复用 EventShop 任务的标准流程：先确认在补给道具页，
+        再用 NO_NAV_EVENT_CHECK 判断活动商店是否存在。不能用 NAV_EVENT
+        的外观比对判存在性——NAV_EVENT 的颜色是选中态颜色（实测未选中
+        态 B 通道差 33 > 阈值 30），点击前必然判否。
+
         Returns:
             bool: False 表示非活动期间，应跳过
         """
         self.ui_goto_shop()
-        timer = Timer(3, count=6).start()
+        timeout = Timer(2, count=4)
         for _ in self.loop():
-            if self.appear(NAV_EVENT, offset=(5, 5)):
+            if self.appear(page_munitions.check_button, threshold=20):
                 break
-            if timer.reached():
-                logger.info('No event shop nav, skip gear skin statistics')
-                return False
-
-        if self.appear(NAV_GENERAL, offset=(5, 5)):
-            self.ui_click(NAV_EVENT, check_button=NAV_EVENT, appear_button=NAV_GENERAL)
-        else:
-            self.device.click(NAV_EVENT)
+            if timeout.reached():
+                self.device.click(SHOP_GOTO_MUNITIONS)
+                timeout.reset()
+        if not self.appear(NAV_GENERAL, offset=(5, 5)):
+            logger.info('Not in munitions page, skip gear skin statistics')
+            return False
+        if self.appear(NO_NAV_EVENT_CHECK, offset=(5, 5)):
+            logger.info('No event shop currently, skip gear skin statistics')
+            return False
+        # check_button=NAV_EVENT 在点击后是选中态才能匹配，这正是其定义色的用途
+        self.ui_click(NAV_EVENT, check_button=NAV_EVENT, appear_button=NAV_GENERAL)
 
         # 活动商店页加载完成前 OCR 可能读到半截文字，重试到超时
         timer = Timer(4, count=8).start()
