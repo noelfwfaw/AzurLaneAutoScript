@@ -39,6 +39,8 @@ CLICK_POINTS = {
     'assist_sun': (639, 33),
     # 「隐藏灵动岛」那一行的实际位置比模板区偏下（模板区落在分区标题上，点了没反应）
     'assist_hide': (640, 530),
+    # 功能面板（属性修改页）右上角的齿轮，点它才进「设置 → 隐藏灵动岛」
+    'assist_gear': (826, 91),
 }
 
 # 点灵动岛没打开面板时的备用点：仍在白色圆角条上，避开太阳图标与右侧图标
@@ -161,6 +163,7 @@ class MaaAssist:
             image = self.screenshot()
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             score = {name: self.match(gray, name) for name in self.templates}
+            self.log_scores(score)
 
             # 没有按钮 = 灵动岛已经隐藏，这是唯一的完成判据
             busy = max(
@@ -178,13 +181,19 @@ class MaaAssist:
             if score['assist_agree'] >= self.THRESHOLD:
                 logger.info(f'AGREE score={score["assist_agree"]:.3f}')
                 self.click('assist_agree')
+                # 换页了，滑动额度重新给这一段用（R4）
+                swipe_times = 0
                 continue
             if score['assist_enter'] >= self.THRESHOLD:
                 logger.info(f'ENTER_ASSIST score={score["assist_enter"]:.3f}')
                 self.click('assist_enter')
+                # 换页了，滑动额度重新给这一段用（R4）
+                swipe_times = 0
                 continue
-            if (score['assist_panel'] >= self.THRESHOLD
-                    and score['assist_gear'] >= self.THRESHOLD_GEAR):
+            # 齿轮模板在真机只有 0.65（素材自测 0.93），双门控永远不过；
+            # 实测本页 assist_panel=0.917，改为「属性修改页 + 已在辅助流程内」判定，
+            # 点击点用 CLICK_POINTS（齿轮模板仅保留在 panel_visible 里）。
+            if score['assist_panel'] >= self.THRESHOLD and opened:
                 logger.info(f'OPEN_SETTINGS score={score["assist_panel"]:.3f}')
                 self.click('assist_gear')
                 continue
@@ -192,6 +201,7 @@ class MaaAssist:
                 if opened:
                     if swipe_times >= self.MAX_SWIPE:
                         logger.warning('辅助启动: failed（声明页滑动 4 次仍未找到按钮）')
+                        self.save_failure(image)
                         return False
                     swipe_times += 1
                     logger.info(f'声明页向下滚动 {swipe_times}/{self.MAX_SWIPE}')
@@ -216,10 +226,12 @@ class MaaAssist:
                     )
                 else:
                     logger.warning('辅助启动: failed（点击灵动岛后仍未打开面板）')
+                    self.save_failure(image)
                     return False
                 continue
 
             logger.info('辅助启动: skipped（未检测到灵动岛）')
+            self.save_failure(image)
             return False
 
         logger.warning(f'辅助启动: failed（超过 {self.MAX_LOOPS} 轮）')
@@ -289,6 +301,38 @@ class MaaAssist:
         a = cv2.cvtColor(before, cv2.COLOR_BGR2GRAY).astype(np.float32)
         b = cv2.cvtColor(after, cv2.COLOR_BGR2GRAY).astype(np.float32)
         return float(np.abs(a - b).mean()) > CHANGE_THRESHOLD
+
+    def log_scores(self, score):
+        """
+        每轮把 6 个模板分数都打出来，失败时才能判断是阈值问题还是页面变了。
+        """
+        logger.info(
+            'scores: sun={:.2f} agree={:.2f} enter={:.2f} gear={:.2f} panel={:.2f} hide={:.2f}'
+            .format(
+                score['assist_sun'], score['assist_agree'], score['assist_enter'],
+                score['assist_gear'], score['assist_panel'], score['assist_hide'],
+            )
+        )
+
+    def save_failure(self, image):
+        """
+        失败时保存现场截图。
+        """
+        folder = os.path.join(os.getcwd(), 'log')
+        if not os.path.isdir(folder):
+            # 部署时可能没有 log/，退到插件根目录
+            folder = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        path = os.path.join(folder, 'assist_fail_{}.png'.format(time.strftime('%H%M%S')))
+        try:
+            # 走 imencode + tofile，避免中文路径下 imwrite 静默失败
+            result, buffer = cv2.imencode('.png', image)
+            if not result:
+                logger.warning('辅助启动: 现场截图编码失败')
+                return
+            buffer.tofile(path)
+            logger.info(f'辅助启动: 现场截图 {path}')
+        except Exception as e:
+            logger.warning(f'辅助启动: 保存现场截图失败 {e}')
 
     def panel_visible(self, score):
         """
