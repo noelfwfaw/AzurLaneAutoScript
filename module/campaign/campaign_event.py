@@ -67,11 +67,18 @@ class CampaignEvent(CampaignStatus):
         )
         tasks = EVENTS + RAIDS + COALITIONS + GEMS_FARMINGS + HOSPITAL
         command = self.config.Scheduler_Command
-        if limit <= 0 or command not in tasks:
+        if command not in tasks:
             return False
         if command in GEMS_FARMINGS and self.stage_is_main(self.config.Campaign_Name):
             return False
 
+        if limit <= 0:
+            # 没设上限也要读一次，否则仪表盘的「活动PT」永远不会更新。
+            # update_event_pt() 自带节流，不会每轮都 OCR。
+            self.update_event_pt()
+            return False
+
+        # 设了上限时不做节流，必须读到最新的 PT 才能及时停
         pt = self.get_event_pt()
         logger.attr('Event_PT_limit', f'{pt}/{limit}')
         if pt >= limit:

@@ -1,4 +1,5 @@
 import re
+from datetime import datetime, timedelta
 
 import cv2
 import numpy as np
@@ -15,6 +16,7 @@ from module.campaign.assets import (
     OCR_OIL_CHECK,
     OCR_OIL_LIMIT,
 )
+from module.config.deep import deep_get
 from module.logger import logger
 from module.log_res.log_res import LogRes
 from module.ocr.ocr import Digit, Ocr
@@ -52,6 +54,10 @@ OCR_PT = PtOcr(OCR_EVENT_PT)
 
 
 class CampaignStatus(UI):
+    # Dashboard.Pt 的刷新间隔。PT 只在活动图主界面右上角可见（OCR_EVENT_PT
+    # 区域 (1196, 109, 1280, 131)），OCR 有开销，普通刷图时每轮都读不划算。
+    EVENT_PT_LOG_INTERVAL = timedelta(minutes=30)
+
     def get_event_pt(self, update=False):
         """
         Returns:
@@ -70,6 +76,29 @@ class CampaignStatus(UI):
         if update:
             self.config.update()
         return pt
+
+    def update_event_pt(self, interval=None):
+        """
+        把活动 PT 同步到仪表盘，与 EventGeneral.PtLimit 无关。
+
+        Pages:
+            in: page_event or page_sp（右上角能看到 PT 的界面）
+
+        Returns:
+            int: 本次读到的 PT；被节流跳过时返回缓存值（可能为 0）
+        """
+        interval = interval or self.EVENT_PT_LOG_INTERVAL
+        # LogRes 是往 config.modified 写的，不会立刻进 config.data，
+        # 只读 data 会让节流失效（每轮都 OCR）
+        record = self.config.modified.get(
+            'Dashboard.Pt.Record',
+            deep_get(self.config.data, 'Dashboard.Pt.Record', default=None),
+        )
+        if isinstance(record, datetime) and record > datetime(2023, 1, 1):
+            if datetime.now() - record < interval:
+                return deep_get(self.config.data, 'Dashboard.Pt.Value', default=0)
+
+        return self.get_event_pt()
 
     def get_coin(self, skip_first_screenshot=True, update=False):
         """
